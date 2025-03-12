@@ -8,7 +8,7 @@ import { environment } from '../../environments/environment';
 export class SocketService {
   private socket: ReturnType<typeof Manager.prototype.socket>;
   private sessionId = signal<string | null>(null);
-  private isConnected = signal<boolean>(false);
+  public isConnected = signal<boolean>(false);
   
   constructor() {
     const options = {
@@ -49,6 +49,13 @@ export class SocketService {
     
     // Пробуем подключиться
     this.socket.connect();
+  }
+  
+  get socketId(): string {
+    if (!this.socket.id) {
+      throw new Error('Socket is not connected');
+    }
+    return this.socket.id;
   }
   
   // Подписка на события

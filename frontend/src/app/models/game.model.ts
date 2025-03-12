@@ -3,17 +3,30 @@ import { CardType } from './card.model';
 export interface GameRoom {
   id: string;
   name: string;
-  isActive: boolean;
-  maxPlayers: number;
-  createdAt: Date;
   players: Player[];
-  gameState: GameState;
+  maxPlayers: number;
+  gameStarted: boolean;
+  currentPlayerId: string | null;
+  lastMove: {
+    playerId: string;
+    cards: number[];
+    declaredCards: {
+      count: number;
+      type: string;
+    };
+  } | null;
+  discardPile: number[];
+}
+
+export interface GameStateUpdate {
+  room: GameRoom;
+  message?: string;
 }
 
 export interface Player {
   id: string;
   name: string;
-  sessionId: string;
+  socketId: string;
   cards: number[];
   revolver: {
     chambers: boolean[];

@@ -28,7 +28,7 @@ export class GameService {
     private gameStateRepository: Repository<GameState>,
   ) {}
 
-  async createRoom(roomName: string): Promise<GameRoom> {
+  async createRoom(roomName: string, maxPlayers = 4, customRoomId?: string): Promise<GameRoom> {
     const gameState = this.gameStateRepository.create({
       deck: [],
       discardPile: [],
@@ -44,8 +44,10 @@ export class GameService {
     await this.gameStateRepository.save(gameState);
 
     const room = this.gameRoomRepository.create({
+      id: customRoomId || undefined, // Если указан customRoomId, используем его
       name: roomName,
       isActive: false,
+      maxPlayers,
       gameState,
     });
 
@@ -53,13 +55,14 @@ export class GameService {
   }
 
   async joinRoom(roomId: string, playerName: string, sessionId: string): Promise<Player> {
-    const room = await this.gameRoomRepository.findOne({
+    let room = await this.gameRoomRepository.findOne({
       where: { id: roomId },
       relations: ['players', 'gameState'],
     });
 
+    // Если комната не найдена, создаем новую
     if (!room) {
-      throw new Error('Room not found');
+      room = await this.createRoom(`Комната ${roomId}`, 4, roomId);
     }
 
     // Проверяем, есть ли уже игрок с таким sessionId
@@ -77,7 +80,7 @@ export class GameService {
     }
 
     const player = this.playerRepository.create({
-      name: playerName,
+      name: playerName || `Игрок ${room.players.length + 1}`,
       sessionId,
       cards: [],
       revolver: {
@@ -106,12 +109,15 @@ export class GameService {
       throw new Error('Not enough players to start the game');
     }
 
-    // Перемешиваем колоду
-    const shuffledDeck = this.shuffleArray([...Array(this.TOTAL_CARDS).keys()].map(i => i + 1));
+    // Создаем и перемешиваем колоду
+    const deck = this.createCards();
+    const shuffledDeck = this.shuffleArray(deck);
     
     // Раздаем карты игрокам
     for (let i = 0; i < room.players.length; i++) {
-      room.players[i].cards = shuffledDeck.splice(0, this.CARDS_PER_PLAYER);
+      // Берем 5 карт для каждого игрока
+      const playerCards = shuffledDeck.splice(0, this.CARDS_PER_PLAYER);
+      room.players[i].cards = playerCards.map(card => card.id);
       room.players[i].isCurrentPlayer = i === 0;
       await this.playerRepository.save(room.players[i]);
     }
@@ -121,9 +127,10 @@ export class GameService {
     const randomBaseCard = baseCardTypes[Math.floor(Math.random() * baseCardTypes.length)];
     
     // Обновляем состояние игры
-    room.gameState.deck = shuffledDeck;
+    room.gameState.deck = shuffledDeck.map(card => card.id); // Оставшиеся карты в колоде
     room.gameState.currentBaseCard = randomBaseCard;
     room.gameState.gamePhase = GamePhase.PLAYER_TURN;
+    room.gameState.cards = deck; // Сохраняем информацию о всех картах
     await this.gameStateRepository.save(room.gameState);
     
     room.isActive = true;
@@ -189,5 +196,182 @@ export class GameService {
       [newArray[i], newArray[j]] = [newArray[j], newArray[i]];
     }
     return newArray;
+  }
+
+  // Сделать ход
+  async makeMove(roomId: string, playerId: string, declaredCards: { count: number; type: string }, cardIds: number[]) {
+    const room = await this.gameRoomRepository.findOne({
+      where: { id: roomId },
+      relations: ['players', 'gameState'],
+    });
+
+    if (!room || !room.gameState) {
+      throw new Error('Room not found or game not initialized');
+    }
+
+    const player = room.players.find(p => p.id === playerId);
+    if (!player) {
+      throw new Error('Player not found');
+    }
+
+    // Проверяем, что это ход данного игрока
+    if (!player.isCurrentPlayer) {
+      throw new Error('Not your turn');
+    }
+
+    // Проверяем, что у игрока есть эти карты
+    const hasAllCards = cardIds.every(cardId => player.cards.includes(cardId));
+    if (!hasAllCards) {
+      throw new Error('Invalid cards');
+    }
+
+    // Удаляем карты из руки игрока
+    player.cards = player.cards.filter(cardId => !cardIds.includes(cardId));
+    await this.playerRepository.save(player);
+
+    // Обновляем состояние игры
+    room.gameState.discardPile = cardIds;
+    room.gameState.lastMove = {
+      playerId,
+      declaredCards,
+      actualCardIds: cardIds
+    };
+
+    // Переходим к следующему игроку
+    const currentPlayerIndex = room.players.findIndex(p => p.id === playerId);
+    const nextPlayerIndex = (currentPlayerIndex + 1) % room.players.length;
+    
+    room.players[currentPlayerIndex].isCurrentPlayer = false;
+    room.players[nextPlayerIndex].isCurrentPlayer = true;
+    room.gameState.currentPlayerIndex = nextPlayerIndex;
+
+    await this.gameStateRepository.save(room.gameState);
+    await this.gameRoomRepository.save(room);
+
+    return room;
+  }
+
+  // Сказать "Лжец!"
+  async callLiar(roomId: string, playerId: string) {
+    const room = await this.gameRoomRepository.findOne({
+      where: { id: roomId },
+      relations: ['players', 'gameState'],
+    });
+
+    if (!room || !room.gameState || !room.gameState.lastMove) {
+      throw new Error('Room not found or no last move');
+    }
+
+    const caller = room.players.find(p => p.id === playerId);
+    if (!caller) {
+      throw new Error('Player not found');
+    }
+
+    // Проверяем, может ли игрок сказать "Лжец!"
+    const lastMovePlayerIndex = room.players.findIndex(p => p.id === room.gameState.lastMove.playerId);
+    const callerIndex = room.players.findIndex(p => p.id === playerId);
+    if (callerIndex !== (lastMovePlayerIndex + 1) % room.players.length) {
+      throw new Error('You cannot call liar now');
+    }
+
+    // Проверяем карты последнего хода
+    const lastMoveCards = room.gameState.lastMove.actualCardIds;
+    const declaredType = room.gameState.lastMove.declaredCards.type;
+    
+    // Получаем типы карт
+    const cardTypes = lastMoveCards.map(cardId => {
+      const card = room.gameState.cards.find(c => c.id === cardId);
+      return card?.type;
+    });
+
+    // Проверяем, все ли карты соответствуют заявленному типу или являются джокерами
+    const allMatch = cardTypes.every(type => type === declaredType || type === CardType.JOKER);
+
+    // Определяем проигравшего
+    const loserIndex = allMatch ? callerIndex : lastMovePlayerIndex;
+    const loser = room.players[loserIndex];
+
+    // Переходим к фазе русской рулетки
+    room.gameState.gamePhase = GamePhase.RUSSIAN_ROULETTE;
+    loser.isCurrentPlayer = true;
+    room.gameState.currentPlayerIndex = loserIndex;
+
+    await this.gameStateRepository.save(room.gameState);
+    await this.gameRoomRepository.save(room);
+
+    return { room, allMatch, cardTypes };
+  }
+
+  // Выстрел из револьвера
+  async triggerRoulette(roomId: string) {
+    const room = await this.gameRoomRepository.findOne({
+      where: { id: roomId },
+      relations: ['players', 'gameState'],
+    });
+
+    if (!room || !room.gameState) {
+      throw new Error('Room not found or game not initialized');
+    }
+
+    const currentPlayer = room.players[room.gameState.currentPlayerIndex];
+    if (!currentPlayer) {
+      throw new Error('Current player not found');
+    }
+
+    // Проверяем, выстрелит ли револьвер
+    const chamber = currentPlayer.revolver.currentChamber;
+    const willFire = currentPlayer.revolver.chambers[chamber];
+
+    if (willFire) {
+      // Игрок выбывает
+      currentPlayer.isActive = false;
+      await this.playerRepository.save(currentPlayer);
+
+      // Проверяем, остался ли только один активный игрок
+      const activePlayers = room.players.filter(p => p.isActive);
+      if (activePlayers.length === 1) {
+        // Игра окончена
+        room.gameState.gamePhase = GamePhase.GAME_OVER;
+        room.gameState.winner = activePlayers[0].id;
+      } else {
+        // Продолжаем игру
+        this.startNextRound(room);
+      }
+    } else {
+      // Револьвер не выстрелил
+      currentPlayer.revolver.currentChamber = (chamber + 1) % 6;
+      await this.playerRepository.save(currentPlayer);
+      
+      // Продолжаем игру
+      this.startNextRound(room);
+    }
+
+    await this.gameStateRepository.save(room.gameState);
+    await this.gameRoomRepository.save(room);
+
+    return { room, willFire };
+  }
+
+  // Вспомогательный метод для начала нового раунда
+  private async startNextRound(room: GameRoom) {
+    if (!room.gameState || !room.gameState.lastMove) return;
+
+    room.gameState.gamePhase = GamePhase.PLAYER_TURN;
+    room.gameState.roundNumber++;
+
+    // Находим следующего активного игрока после того, кто сделал последний ход
+    const lastMovePlayerIndex = room.players.findIndex(p => p.id === room.gameState.lastMove.playerId);
+    let nextPlayerIndex = (lastMovePlayerIndex + 1) % room.players.length;
+    while (!room.players[nextPlayerIndex].isActive) {
+      nextPlayerIndex = (nextPlayerIndex + 1) % room.players.length;
+    }
+
+    // Обновляем текущего игрока
+    room.players.forEach((p, i) => p.isCurrentPlayer = i === nextPlayerIndex);
+    room.gameState.currentPlayerIndex = nextPlayerIndex;
+
+    // Очищаем информацию о последнем ходе
+    room.gameState.lastMove = null;
+    room.gameState.discardPile = [];
   }
 } 

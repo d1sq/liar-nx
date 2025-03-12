@@ -1,352 +1,201 @@
 import { Injectable, signal } from '@angular/core';
-import { Card, CardType, CARD_NAMES } from '../models/card.model';
-import { GamePhase, GameState, GameRoom, Player } from '../models/game.model';
 import { SocketService } from './socket.service';
+import { GameRoom, GameStateUpdate, Player } from '../models/game.model';
 
 @Injectable({
   providedIn: 'root'
 })
 export class GameService {
-  // Сигналы для реактивного обновления UI
+  private rooms = signal<GameRoom[]>([]);
   private currentRoom = signal<GameRoom | null>(null);
   private currentPlayer = signal<Player | null>(null);
-  private availableRooms = signal<GameRoom[]>([]);
-  private isLoading = signal<boolean>(false);
-  private gameState = signal<GameState | null>(null);
-  private cards = signal<Card[]>([]);
-  private error = signal<string | null>(null);
-  
+  public error = signal<string | null>(null);
+  public loading = signal<boolean>(false);
+
   constructor(private socketService: SocketService) {
-    // Подписываемся на обновления комнаты
-    this.socketService.on<GameRoom>('roomUpdated', (room) => {
-      if (this.currentRoom() && this.currentRoom()?.id === room.id) {
-        this.currentRoom.set(room);
-        
-        // Проверяем и инициализируем gameState
-        if (room.gameState) {
-          // Убедимся, что players существует в gameState
-          if (!room.gameState.players && room.players) {
-            room.gameState.players = room.players;
-          }
-          this.gameState.set(room.gameState);
-        }
-        
-        // Обновляем текущего игрока
-        const player = room.players.find(p => p.sessionId === this.socketService.getSessionId()());
-        if (player) {
-          this.currentPlayer.set(player);
-        }
+    this.socketService.on<GameStateUpdate>('gameStateUpdated', (data) => {
+      if (data.room) {
+        this.currentRoom.set(data.room);
+        const player = data.room.players.find((p: Player) => p.socketId === this.socketService.socketId);
+        this.currentPlayer.set(player ?? null);
       }
     });
-    
-    // Подписываемся на начало игры
-    this.socketService.on<GameRoom>('gameStarted', (room) => {
-      console.log('Game started event received:', room);
-      if (this.currentRoom() && this.currentRoom()?.id === room.id) {
-        this.currentRoom.set(room);
-        
-        // Проверяем и инициализируем gameState
-        if (room.gameState) {
-          console.log('Game state before update:', room.gameState);
-          // Убедимся, что players существует в gameState
-          if (!room.gameState.players && room.players) {
-            console.log('Adding players to gameState:', room.players);
-            room.gameState.players = room.players;
-          }
-          this.gameState.set(room.gameState);
-          console.log('Game state after update:', this.gameState());
-        } else {
-          console.warn('No game state in room:', room);
-        }
-        
-        // Обновляем текущего игрока
-        const player = room.players.find(p => p.sessionId === this.socketService.getSessionId()());
-        if (player) {
-          this.currentPlayer.set(player);
-          console.log('Current player updated:', player);
-        } else {
-          console.warn('Current player not found in room players');
-        }
-      }
+
+    this.socketService.on<GameRoom[]>('roomsUpdated', (rooms) => {
+      this.rooms.set(rooms);
     });
-    
-    // Подписываемся на ошибки подключения
+
+    this.socketService.on<{ result: string }>('liarResult', (data) => {
+      // Обработка результата вызова "Лжец!"
+      console.log('Liar result:', data);
+    });
+
+    this.socketService.on<{ result: string }>('rouletteResult', (data) => {
+      // Обработка результата русской рулетки
+      console.log('Roulette result:', data);
+    });
+
     this.socketService.on<string>('error', (error) => {
       this.error.set(error);
-      this.isLoading.set(false);
     });
-
-    // Подписываемся на изменение состояния подключения
-    this.socketService.on('connect', () => {
-      this.error.set(null);
-      this.loadRooms();
-    });
-
-    this.socketService.on('disconnect', () => {
-      this.error.set('Нет подключения к серверу');
-    });
-
-    this.socketService.on('connect_error', () => {
-      this.error.set('Ошибка подключения к серверу');
-    });
-    
-    // Загружаем доступные комнаты при инициализации
-    if (this.socketService.getIsConnected()()) {
-      this.loadRooms();
-    } else {
-      this.error.set('Нет подключения к серверу');
-    }
   }
-  
-  // Геттеры для получения текущего состояния
+
+  // Геттеры для сигналов
+  getRooms() {
+    return this.rooms.asReadonly();
+  }
+
   getCurrentRoom() {
     return this.currentRoom.asReadonly();
   }
-  
+
   getCurrentPlayer() {
     return this.currentPlayer.asReadonly();
   }
-  
-  getAvailableRooms() {
-    return this.availableRooms.asReadonly();
-  }
-  
-  getIsLoading() {
-    return this.isLoading.asReadonly();
-  }
-  
-  getGameState() {
-    return this.gameState.asReadonly();
-  }
-  
-  getCards() {
-    return this.cards.asReadonly();
-  }
-  
+
   getError() {
     return this.error.asReadonly();
   }
-  
-  // Загрузка доступных комнат
-  async loadRooms() {
-    if (!this.socketService.getIsConnected()()) {
-      this.error.set('Нет подключения к серверу');
-      return;
-    }
-    
+
+  getLoading() {
+    return this.loading.asReadonly();
+  }
+
+  async loadRooms(): Promise<void> {
     try {
-      this.isLoading.set(true);
-      this.error.set(null);
-      const response = await this.socketService.emit<{ rooms: GameRoom[] }>('getRooms', {});
-      this.availableRooms.set(response.rooms);
+      this.loading.set(true);
+      const rooms = await this.socketService.emit<GameRoom[]>('getRooms', {});
+      this.rooms.set(rooms);
     } catch (error) {
-      console.error('Error loading rooms:', error);
-      this.error.set('Ошибка при загрузке комнат');
+      this.error.set(error instanceof Error ? error.message : 'Failed to load rooms');
     } finally {
-      this.isLoading.set(false);
+      this.loading.set(false);
     }
   }
-  
-  // Создание новой комнаты
-  async createRoom(roomName: string) {
-    if (!this.socketService.getIsConnected()()) {
-      this.error.set('Нет подключения к серверу');
-      throw new Error('Not connected to server');
-    }
-    
+
+  async createRoom(name: string, maxPlayers: number, roomId?: string): Promise<{ success: boolean; room: GameRoom }> {
     try {
-      this.isLoading.set(true);
-      this.error.set(null);
-      const response = await this.socketService.emit<{ room: GameRoom }>('createRoom', { roomName });
-      this.availableRooms.update(rooms => [...rooms, response.room]);
-      return response.room;
-    } catch (error) {
-      console.error('Error creating room:', error);
-      this.error.set('Ошибка при создании комнаты');
-      throw error;
-    } finally {
-      this.isLoading.set(false);
-    }
-  }
-  
-  // Присоединение к комнате
-  async joinRoom(roomId: string, playerName: string) {
-    if (!this.socketService.getIsConnected()()) {
-      this.error.set('Нет подключения к серверу');
-      throw new Error('Not connected to server');
-    }
-    
-    try {
-      this.isLoading.set(true);
-      this.error.set(null);
-      const response = await this.socketService.emit<{ player: Player; room: GameRoom }>('joinRoom', { roomId, playerName });
+      this.loading.set(true);
+      const response = await this.socketService.emit<{ success: boolean; room: GameRoom }>('createRoom', { 
+        name, 
+        maxPlayers,
+        roomId
+      });
       
-      // Сохраняем sessionId
-      this.socketService.saveSessionId(response.player.sessionId);
-      
-      // Обновляем текущую комнату и игрока
-      this.currentRoom.set(response.room);
-      this.currentPlayer.set(response.player);
-      this.gameState.set(response.room.gameState);
-      
-      return response;
-    } catch (error) {
-      console.error('Error joining room:', error);
-      this.error.set('Ошибка при присоединении к комнате');
-      throw error;
-    } finally {
-      this.isLoading.set(false);
-    }
-  }
-  
-  // Начало игры
-  async startGame(roomId: string) {
-    if (!this.socketService.getIsConnected()()) {
-      this.error.set('Нет подключения к серверу');
-      throw new Error('Not connected to server');
-    }
-    
-    try {
-      this.isLoading.set(true);
-      this.error.set(null);
-      console.log('Starting game for room:', roomId);
-      const response = await this.socketService.emit<{ room: GameRoom }>('startGame', { roomId });
-      console.log('Start game response:', response);
-      
-      // Проверяем и инициализируем gameState
-      if (response.room.gameState) {
-        console.log('Game state from response:', response.room.gameState);
-        // Убедимся, что players существует в gameState
-        if (!response.room.gameState.players && response.room.players) {
-          console.log('Adding players to gameState:', response.room.players);
-          response.room.gameState.players = response.room.players;
-        }
-      } else {
-        console.warn('No game state in response room');
+      if (!response.success) {
+        throw new Error('Failed to create room');
       }
       
       this.currentRoom.set(response.room);
-      this.gameState.set(response.room.gameState);
-      console.log('Game state after start game:', this.gameState());
-      
-      return response.room;
+      return response;
     } catch (error) {
-      console.error('Error starting game:', error);
-      this.error.set('Ошибка при запуске игры');
+      this.error.set(error instanceof Error ? error.message : 'Failed to create room');
       throw error;
     } finally {
-      this.isLoading.set(false);
+      this.loading.set(false);
     }
   }
-  
-  // Получение карты по ID
-  getCardById(cardId: number): Card | undefined {
-    const gameState = this.currentRoom()?.gameState;
-    if (!gameState) return undefined;
-    
-    const card = gameState.cards.find(card => card.id === cardId);
-    if (!card) return undefined;
-    
-    return {
-      id: card.id,
-      type: card.type
-    };
-  }
-  
-  // Получение имени карты
-  getCardName(cardType: CardType): string {
-    return CARD_NAMES[cardType];
-  }
-  
-  // Выход из комнаты
-  leaveRoom() {
-    this.currentRoom.set(null);
-    this.currentPlayer.set(null);
-    this.socketService.clearSessionId();
-  }
-  
-  // Игровые методы
-  async initGame(playerNames: string[]) {
-    if (!this.socketService.getIsConnected()()) {
-      this.error.set('Нет подключения к серверу');
-      throw new Error('Not connected to server');
-    }
-    
+
+  async joinRoom(roomId: string, playerName: string): Promise<void> {
     try {
-      this.isLoading.set(true);
-      this.error.set(null);
-      const response = await this.socketService.emit<{ gameState: GameState }>('initGame', { playerNames });
-      this.gameState.set(response.gameState);
-    } catch (error) {
-      console.error('Error initializing game:', error);
-      this.error.set('Ошибка при инициализации игры');
-      throw error;
-    } finally {
-      this.isLoading.set(false);
-    }
-  }
-  
-  async makeMove(playerId: string, declaredCards: { count: number; type: string }, cardIds: number[]) {
-    if (!this.socketService.getIsConnected()()) {
-      this.error.set('Нет подключения к серверу');
-      throw new Error('Not connected to server');
-    }
-    
-    try {
-      this.isLoading.set(true);
-      this.error.set(null);
-      const response = await this.socketService.emit<{ gameState: GameState }>('makeMove', {
-        playerId,
-        declaredCards,
-        cardIds
+      this.loading.set(true);
+      const response = await this.socketService.emit<{ success: boolean; room: GameRoom }>('joinRoom', { 
+        roomId,
+        playerName
       });
-      this.gameState.set(response.gameState);
+      
+      if (!response.success) {
+        throw new Error('Failed to join room');
+      }
+      
+      this.currentRoom.set(response.room);
     } catch (error) {
-      console.error('Error making move:', error);
-      this.error.set('Ошибка при выполнении хода');
+      this.error.set(error instanceof Error ? error.message : 'Failed to join room');
       throw error;
     } finally {
-      this.isLoading.set(false);
+      this.loading.set(false);
     }
   }
-  
-  async callLiar(playerId: string) {
-    if (!this.socketService.getIsConnected()()) {
-      this.error.set('Нет подключения к серверу');
-      throw new Error('Not connected to server');
-    }
-    
+
+  async startGame(roomId: string): Promise<void> {
     try {
-      this.isLoading.set(true);
-      this.error.set(null);
-      const response = await this.socketService.emit<{ gameState: GameState }>('callLiar', { playerId });
-      this.gameState.set(response.gameState);
+      this.loading.set(true);
+      const room = await this.socketService.emit<GameRoom>('startGame', { roomId });
+      this.currentRoom.set(room);
     } catch (error) {
-      console.error('Error calling liar:', error);
-      this.error.set('Ошибка при объявлении лжеца');
-      throw error;
+      this.error.set(error instanceof Error ? error.message : 'Failed to start game');
     } finally {
-      this.isLoading.set(false);
+      this.loading.set(false);
     }
   }
-  
-  async triggerRoulette() {
-    if (!this.socketService.getIsConnected()()) {
-      this.error.set('Нет подключения к серверу');
-      throw new Error('Not connected to server');
-    }
-    
+
+  async leaveRoom(roomId: string): Promise<void> {
     try {
-      this.isLoading.set(true);
-      this.error.set(null);
-      const response = await this.socketService.emit<{ gameState: GameState }>('triggerRoulette', {});
-      this.gameState.set(response.gameState);
+      this.loading.set(true);
+      await this.socketService.emit<void>('leaveRoom', { roomId });
+      this.currentRoom.set(null);
+      this.currentPlayer.set(null);
     } catch (error) {
-      console.error('Error triggering roulette:', error);
-      this.error.set('Ошибка при запуске рулетки');
-      throw error;
+      this.error.set(error instanceof Error ? error.message : 'Failed to leave room');
     } finally {
-      this.isLoading.set(false);
+      this.loading.set(false);
     }
+  }
+
+  async makeMove(roomId: string, declaredCards: { count: number; type: string }, cardIds: number[]): Promise<void> {
+    try {
+      this.loading.set(true);
+      const room = await this.socketService.emit<GameRoom>('makeMove', { roomId, declaredCards, cardIds });
+      this.currentRoom.set(room);
+    } catch (error) {
+      this.error.set(error instanceof Error ? error.message : 'Failed to make move');
+    } finally {
+      this.loading.set(false);
+    }
+  }
+
+  async callLiar(roomId: string): Promise<void> {
+    try {
+      this.loading.set(true);
+      const room = await this.socketService.emit<GameRoom>('callLiar', { roomId });
+      this.currentRoom.set(room);
+    } catch (error) {
+      this.error.set(error instanceof Error ? error.message : 'Failed to call liar');
+    } finally {
+      this.loading.set(false);
+    }
+  }
+
+  async triggerRoulette(roomId: string): Promise<void> {
+    try {
+      this.loading.set(true);
+      const room = await this.socketService.emit<GameRoom>('triggerRoulette', { roomId });
+      this.currentRoom.set(room);
+    } catch (error) {
+      this.error.set(error instanceof Error ? error.message : 'Failed to trigger roulette');
+    } finally {
+      this.loading.set(false);
+    }
+  }
+
+  getCardById(id: number): { type: string; value: number } {
+    const type = Math.floor(id / 13);
+    const value = (id % 13) + 2;
+    return { type: this.getCardType(type), value };
+  }
+
+  private getCardType(type: number): string {
+    switch (type) {
+      case 0: return 'hearts';
+      case 1: return 'diamonds';
+      case 2: return 'clubs';
+      case 3: return 'spades';
+      default: throw new Error('Invalid card type');
+    }
+  }
+
+  getCardName(card: { type: string; value: number }): string {
+    const valueNames = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'Jack', 'Queen', 'King', 'Ace'];
+    return `${valueNames[card.value - 2]} of ${card.type}`;
   }
 } 
